@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "1.0",
+  "templateSlug": "cv-crud-desktop-git",
+  "evaluationBlocks": [
+    {
+      "blockId": "auto",
+      "evaluationType": "automated_pipeline",
+      "metrics": [
+        {
+          "metricKey": "crud_completeness",
+          "worker": "StaticAnalyzer",
+          "weight": 25,
+          "threshold": 1.0,
+          "config": {
+            "file": "starter-code/src/main/java/com/yura/workshop/repositories/ProductRepositoryImpl.java",
+            "requiredMethods": ["save", "findAll", "findById", "update", "delete"]
+          }
+        },
+        {
+          "metricKey": "commit_message_quality",
+          "worker": "CommitAnalyzer",
+          "weight": 20,
+          "threshold": 0.7,
+          "config": {
+            "pattern": "^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\\(.+\\))?: .{1,72}$",
+            "minCommits": 8
+          }
+        },
+        {
+          "metricKey": "branch_naming_convention",
+          "worker": "CommitAnalyzer",
+          "weight": 15,
+          "threshold": 1.0,
+          "config": {
+            "pattern": "^(feature|feat|fix|bugfix|hotfix|chore|docs|test|refactor|ci)/.+"
+          }
+        },
+        {
+          "metricKey": "layer_separation",
+          "worker": "StaticAnalyzer",
+          "weight": 20,
+          "threshold": 0.8,
+          "config": {
+            "uiDir": "starter-code/src/main/java/com/yura/workshop/ui",
+            "jdbcForbiddenInUi": ["java.sql", "PreparedStatement", "DriverManager"],
+            "daoDir": "starter-code/src/main/java/com/yura/workshop/repositories",
+            "swingForbiddenInDao": ["javax.swing", "java.awt"]
+          }
+        },
+        {
+          "metricKey": "test_coverage",
+          "worker": "BuildRunner",
+          "weight": 15,
+          "threshold": 0.6,
+          "config": {
+            "buildCommand": "mvn -f starter-code/pom.xml test jacoco:report -B",
+            "reportPath": "starter-code/target/site/jacoco/jacoco.xml",
+            "targetClass": "com/yura/workshop/repositories/ProductRepositoryImpl"
+          }
+        },
+        {
+          "metricKey": "pr_description_completeness",
+          "worker": "GitHubApiWorker",
+          "weight": 5,
+          "threshold": 0.5,
+          "config": {
+            "minBodyLength": 100
+          }
+        }
+      ]
+    }
+  ]
+}

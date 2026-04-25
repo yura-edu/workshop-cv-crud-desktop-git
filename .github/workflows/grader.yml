@@ -1,0 +1,257 @@
+name: Grader
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: yura_workshop
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Apply database schema
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d yura_workshop \
+            -f starter-code/database/schema.sql
+
+      # ── Branch naming ──────────────────────────────────────────────────────
+      - name: Check branch naming convention
+        id: branch_naming
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          echo "Branch: $BRANCH"
+          PATTERN="^(feature|feat|fix|bugfix|hotfix|chore|docs|test|refactor|ci)/.+"
+          if echo "$BRANCH" | grep -qE "$PATTERN"; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Branch name OK: $BRANCH"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Branch name invalid: $BRANCH"
+            echo "Expected pattern: feature/<name>, fix/<name>, chore/<name>, etc."
+          fi
+
+      # ── Commit message quality ─────────────────────────────────────────────
+      - name: Check commit message quality
+        id: commit_quality
+        run: |
+          PATTERN="^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\(.+\))?: .{1,72}$"
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -n "$BASE" ]; then
+            COMMITS=$(git log --format="%s" "$BASE"..HEAD)
+          else
+            COMMITS=$(git log --format="%s" HEAD~10..HEAD 2>/dev/null || git log --format="%s")
+          fi
+          TOTAL=0; PASSING=0
+          while IFS= read -r MSG; do
+            [ -z "$MSG" ] && continue
+            TOTAL=$((TOTAL + 1))
+            if echo "$MSG" | grep -qE "$PATTERN"; then
+              PASSING=$((PASSING + 1)); echo "✅ $MSG"
+            else
+              echo "❌ $MSG"
+            fi
+          done <<< "$COMMITS"
+          if [ "$TOTAL" -eq 0 ]; then
+            SCORE="0.0"; PASSED="false"
+          else
+            SCORE=$(echo "scale=2; $PASSING / $TOTAL" | bc)
+            PASSED=$([ "$(echo "$SCORE >= 0.7" | bc)" -eq 1 ] && echo "true" || echo "false")
+          fi
+          echo "Total: $TOTAL, Passing: $PASSING, Score: $SCORE"
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+
+      # ── CRUD completeness (static analysis) ────────────────────────────────
+      - name: Check CRUD completeness
+        id: crud_completeness
+        run: |
+          IMPL="starter-code/src/main/java/com/yura/workshop/repositories/ProductRepositoryImpl.java"
+          FOUND=0
+          for METHOD in "save" "findAll" "findById" "update" "delete"; do
+            HAS_METHOD=$(grep -c "public.*${METHOD}(" "$IMPL" 2>/dev/null || echo "0")
+            HAS_IMPL=$(grep -A20 "public.*${METHOD}(" "$IMPL" 2>/dev/null \
+              | grep -cE "prepareStatement|PreparedStatement|executeUpdate|executeQuery" || echo "0")
+            IS_STUB=$(grep -A5 "public.*${METHOD}(" "$IMPL" 2>/dev/null \
+              | grep -c "UnsupportedOperationException" || echo "0")
+            if [ "$HAS_METHOD" -gt 0 ] && [ "$HAS_IMPL" -gt 0 ] && [ "$IS_STUB" -eq 0 ]; then
+              FOUND=$((FOUND + 1))
+              echo "✅ $METHOD implemented"
+            else
+              echo "❌ $METHOD missing or stub"
+            fi
+          done
+          SCORE=$(echo "scale=2; $FOUND / 5" | bc)
+          PASSED=$([ "$FOUND" -eq 5 ] && echo "true" || echo "false")
+          echo "Implemented: $FOUND/5"
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+
+      # ── Layer separation ───────────────────────────────────────────────────
+      - name: Check layer separation
+        id: layer_separation
+        run: |
+          UI_DIR="starter-code/src/main/java/com/yura/workshop/ui"
+          DAO_DIR="starter-code/src/main/java/com/yura/workshop/repositories"
+          IMPL="$DAO_DIR/ProductRepositoryImpl.java"
+          VIOLATIONS=0
+
+          # JDBC in UI layer (skip the provided ProductFrame.java)
+          STUDENT_UI=$(find "$UI_DIR" -name "*.java" ! -name "ProductFrame.java" 2>/dev/null)
+          if [ -n "$STUDENT_UI" ] && echo "$STUDENT_UI" | xargs grep -l "java\.sql\|PreparedStatement\|DriverManager" 2>/dev/null | grep -q .; then
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo "❌ JDBC imports found in UI layer"
+          else
+            echo "✅ UI layer clean of JDBC"
+          fi
+
+          # Swing in DAO layer
+          if grep -l "javax\.swing\|java\.awt" "$DAO_DIR"/*.java 2>/dev/null | grep -q .; then
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo "❌ Swing imports found in DAO layer"
+          else
+            echo "✅ DAO layer clean of Swing"
+          fi
+
+          # DAO uses PreparedStatement
+          if grep -q "prepareStatement\|PreparedStatement" "$IMPL" 2>/dev/null; then
+            echo "✅ DAO uses PreparedStatement"
+          else
+            VIOLATIONS=$((VIOLATIONS + 1))
+            echo "❌ DAO does not use PreparedStatement"
+          fi
+
+          if [ "$VIOLATIONS" -eq 0 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"; echo "passed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$VIOLATIONS" -eq 1 ]; then
+            echo "score=0.67" >> "$GITHUB_OUTPUT"; echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "score=0.0" >> "$GITHUB_OUTPUT"; echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Build and test with JaCoCo ─────────────────────────────────────────
+      - name: Run tests with coverage
+        id: test_coverage
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/yura_workshop
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+        run: |
+          cd starter-code
+          if mvn test jacoco:report -B -q 2>&1; then
+            BUILD_OK=true
+          else
+            BUILD_OK=false
+          fi
+
+          if [ "$BUILD_OK" = "true" ] && [ -f "target/site/jacoco/jacoco.xml" ]; then
+            SCORE=$(python3 -c "
+          import xml.etree.ElementTree as ET, sys
+          try:
+              tree = ET.parse('target/site/jacoco/jacoco.xml')
+              for cls in tree.getroot().iter('class'):
+                  if 'ProductRepositoryImpl' in cls.get('name', ''):
+                      for c in cls.iter('counter'):
+                          if c.get('type') == 'INSTRUCTION':
+                              cov = int(c.get('covered', 0))
+                              mis = int(c.get('missed', 0))
+                              tot = cov + mis
+                              print(f'{cov/tot:.2f}' if tot > 0 else '0.00')
+                              sys.exit(0)
+          except Exception:
+              pass
+          print('0.00')
+          ")
+            PASSED=$(python3 -c "print('true' if float('$SCORE') >= 0.6 else 'false')")
+            echo "Coverage score: $SCORE"
+          else
+            SCORE="0.0"; PASSED="false"
+            echo "Build or tests failed — coverage = 0"
+          fi
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+
+      # ── PR description completeness ────────────────────────────────────────
+      - name: Check PR description completeness
+        id: pr_description
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          TOTAL_LEN=$(( ${#PR_TITLE} + ${#PR_BODY} ))
+          if [ "$TOTAL_LEN" -ge 100 ]; then
+            echo "score=1.0" >> "$GITHUB_OUTPUT"; echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ PR description complete ($TOTAL_LEN chars)"
+          else
+            SCORE=$(echo "scale=2; $TOTAL_LEN / 100" | bc)
+            echo "score=$SCORE" >> "$GITHUB_OUTPUT"; echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ PR description short ($TOTAL_LEN / 100 required)"
+          fi
+
+      # ── Grader report ──────────────────────────────────────────────────────
+      - name: Build grader report
+        run: |
+          PR_SCORE="${{ steps.pr_description.outputs.score }}"
+          PR_PASSED="${{ steps.pr_description.outputs.passed }}"
+          if [ -z "$PR_SCORE" ]; then
+            PR_SCORE="null"; PR_PASSED="null"; PR_UNAVAILABLE="true"
+          else
+            PR_UNAVAILABLE="false"
+          fi
+          cat > grader-report.json << EOF
+          {
+            "schemaVersion": "1.0",
+            "templateSlug": "cv-crud-desktop-git",
+            "runId": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}",
+            "metrics": [
+              { "metricKey": "crud_completeness",        "score": ${{ steps.crud_completeness.outputs.score }},  "passed": ${{ steps.crud_completeness.outputs.passed }},  "unavailable": false },
+              { "metricKey": "commit_message_quality",   "score": ${{ steps.commit_quality.outputs.score }},     "passed": ${{ steps.commit_quality.outputs.passed }},     "unavailable": false },
+              { "metricKey": "branch_naming_convention", "score": ${{ steps.branch_naming.outputs.score }},      "passed": ${{ steps.branch_naming.outputs.passed }},      "unavailable": false },
+              { "metricKey": "layer_separation",         "score": ${{ steps.layer_separation.outputs.score }},   "passed": ${{ steps.layer_separation.outputs.passed }},   "unavailable": false },
+              { "metricKey": "test_coverage",            "score": ${{ steps.test_coverage.outputs.score }},      "passed": ${{ steps.test_coverage.outputs.passed }},      "unavailable": false },
+              { "metricKey": "pr_description_completeness", "score": $PR_SCORE, "passed": $PR_PASSED, "unavailable": $PR_UNAVAILABLE }
+            ]
+          }
+          EOF
+          cat grader-report.json
+
+      - name: Upload grader report
+        uses: actions/upload-artifact@v4
+        with:
+          name: grader-report
+          path: grader-report.json
