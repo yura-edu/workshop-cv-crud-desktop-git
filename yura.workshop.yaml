@@ -1,0 +1,77 @@
+# yura.workshop.yaml — declarative grader config
+# Spec: docs/grader-workers-spec.md §6
+# Generated from prisma/seeds/workshop-templates.seed.ts
+
+schema_version: "1.0"
+workshop:
+  id: cv-crud-desktop-git
+  title: "CRUD Desktop con flujo Git profesional"
+  type: git_workflow
+  language: java
+  passing_threshold: 70
+  base_branch: main
+submission:
+  source: workshop_link
+  required_inputs:
+    - type: github_repo_url
+      label: "URL del repositorio"
+      required: true
+    - type: github_pr_url
+      label: "URL del Pull Request"
+      required: true
+evaluation_profile:
+  - metric_id: crud_operations_completeness
+    weight: 25
+    threshold: 1
+    config:
+      required_operations:
+        - create
+        - read
+        - update
+        - delete
+  - metric_id: commit_message_quality
+    weight: 20
+    threshold: 0.7
+    config:
+      pattern: "^(feat|fix|chore|docs|refactor|test|style|perf|ci|build)(\\(.+\\))?: .{10,}$"
+      min_message_length: 10
+      range: pr_only
+      max_violations_allowed: 0
+  - metric_id: branch_naming_convention
+    weight: 15
+    threshold: 1
+    config:
+      pattern: "^(feature|bugfix|hotfix|chore|feat|fix|test|docs|refactor|ci)/[a-z0-9-]+$"
+  - metric_id: n_tier_separation_score
+    weight: 15
+    threshold: 0.8
+    config:
+      min_score: 0.8
+  - metric_id: test_coverage
+    weight: 15
+    threshold: 0.6
+    config:
+      runner: maven
+      coverage_tool: jacoco
+      coverage_format: jacoco_xml
+      report_path: target/site/jacoco/jacoco.xml
+      include_paths:
+        - src/
+      exclude_paths:
+        - tests/
+        - "**/__init__.py"
+        - "**/*.spec.ts"
+        - "**/*.test.ts"
+      min_coverage_percent: 60
+      min_coverage_per_file: 0
+      timeout_seconds: 300
+      extra_args: []
+  - metric_id: pr_description_completeness
+    weight: 10
+    threshold: 0.5
+    config:
+      required_sections:
+        - "## Summary"
+        - "## Test plan"
+      min_words_per_section: 10
+      forbid_empty_sections: true
